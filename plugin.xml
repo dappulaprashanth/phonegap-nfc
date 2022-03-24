@@ -11,7 +11,7 @@
 
     <license>MIT</license>
     <keywords>nfc, NFC, NDEF</keywords>
-    <repo>https://github.com/chariotsolutions/phonegap-nfc.git</repo>
+    <repo>https://github.com/dappulaprashanth/phonegap-nfc.git</repo>
     <issue>https://github.com/chariotsolutions/phonegap-nfc/issues</issue>
 
     <platform name="android">
