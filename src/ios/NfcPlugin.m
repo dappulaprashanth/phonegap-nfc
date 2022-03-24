@@ -9,7 +9,7 @@
 @interface NfcPlugin() {
     NSString* sessionCallbackId;
     NSString* channelCallbackId;
-    id<NFCNDEFTag> connectedTag API_AVAILABLE(ios(13.0));
+    id<NFCTag> connectedTag API_AVAILABLE(ios(13.0));
     NFCNDEFStatus connectedTagStatus API_AVAILABLE(ios(13.0));
 }
 @property (nonatomic, assign) BOOL writeMode;
@@ -83,7 +83,7 @@
     self.returnTagInEvent = NO;
 
     NSArray<NSDictionary *> *options = [command argumentAtIndex:0];
-    self.keepSessionOpen = [options valueForKey:@"keepSessionOpen"];
+    self.keepSessionOpen = YES;//[options valueForKey:@"keepSessionOpen"];
 
     [self startScanSession:command];
 }
@@ -135,16 +135,76 @@
         }
     }
 
-    self.nfcSession.alertMessage = @"Hold near writable NFC tag to update.";
+    self.nfcSession.alertMessage = @"Hold near wearable";
     sessionCallbackId = [command.callbackId copy];
 
     if (reusingSession) {                   // reusing a read session to write
         self.keepSessionOpen = NO;          // close session after writing
-        [self writeNDEFTag:self.nfcSession status:connectedTagStatus tag:connectedTag];
+        [self writeNDEFTag:self.nfcSession status:connectedTagStatus tag:(id<NFCNDEFTag>)connectedTag];
     } else {
         [self.nfcSession beginSession];
     }
 }
+
+- (void)sendApdu:(CDVInvokedUrlCommand*)command API_AVAILABLE(ios(13.0)){
+    NSLog(@"sendApdu");
+    
+    self.shouldUseTagReaderSession = YES;
+    BOOL reusingSession = NO;
+    
+    NSData *apduData = [command.arguments objectAtIndex:0];
+    
+    NSString *strData = [self binToHexRep:apduData];
+    NSLog(@"Payload String: %@",strData);
+    
+    if (self.nfcSession && self.nfcSession.isReady) {       // reuse existing session
+        reusingSession = YES;
+    } else {
+        NSLog(@"Using NFCTagReaderSession");
+
+        self.nfcSession = [[NFCTagReaderSession new]
+                   initWithPollingOption:(NFCPollingISO14443 | NFCPollingISO15693)
+                   delegate:self queue:dispatch_get_main_queue()];
+    }
+    self.nfcSession.alertMessage = @"Loading Data...";
+    sessionCallbackId = [command.callbackId copy];
+
+    if (reusingSession) {                   // reusing a read session to send
+        NSLog(@"Reusing Session");
+        self.keepSessionOpen = YES;
+     
+        NFCISO7816APDU *cmd = [[NFCISO7816APDU alloc]initWithData:apduData];
+        NSLog(@"CLA: %hhu", [cmd instructionClass]);
+        NSLog(@"INS: %hhu", [cmd instructionCode]);
+        NSLog(@"P1: %hhu", [cmd p1Parameter]);
+        NSLog(@"P2: %hhu", [cmd p2Parameter]);
+        NSLog(@"Data: %@", [cmd data]);
+        
+        id<NFCISO7816Tag> isoTag = (id<NFCISO7816Tag>)connectedTag;
+        [isoTag sendCommandAPDU:(cmd) completionHandler:^(NSData * _Nonnull responseData, uint8_t sw1, uint8_t sw2, NSError * _Nullable error) {
+            if (error) {
+                NSLog(@"Error: %@", error);
+                [self closeSession:self.nfcSession withError:@"Unable to send APDU."];
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Error when sending APDU"];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+                return;
+            } else {
+                self.nfcSession.alertMessage = @"Done!";
+                NSMutableData *response = [[NSMutableData alloc] init];
+                [response appendData:responseData];
+                [response appendBytes:&sw1 length:sizeof(sw1)];
+                [response appendBytes:&sw2 length:sizeof(sw2)];
+                NSString *strRspData = [self binToHexRep:response];
+                CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArrayBuffer:response];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:sessionCallbackId];
+            }
+        }];
+    } else {
+        NSLog(@"Creating New Session");
+        [self.nfcSession beginSession];
+    }
+}
+
 
 - (void)cancelScan:(CDVInvokedUrlCommand*)command API_AVAILABLE(ios(11.0)){
     NSLog(@"cancelScan");
@@ -204,7 +264,7 @@
 - (void) readerSession:(NFCNDEFReaderSession *)session didDetectNDEFs:(NSArray<NFCNDEFMessage *> *)messages API_AVAILABLE(ios(11.0)) {
     NSLog(@"NFCNDEFReaderSession didDetectNDEFs");
     
-    session.alertMessage = @"Tag successfully read.";
+    session.alertMessage = @"Done!";
     for (NFCNDEFMessage *message in messages) {
         [self fireNdefEvent: message];
     }
@@ -272,7 +332,7 @@
     
     id<NFCTag> tag = [tags firstObject];
     NSMutableDictionary *tagMetaData = [self getTagInfo:tag];
-    id<NFCNDEFTag> ndefTag = (id<NFCNDEFTag>)tag;
+    //id<NFCNDEFTag> ndefTag = (id<NFCNDEFTag>)tag;
     
     [session connectToTag:tag completionHandler:^(NSError * _Nullable error) {
         if (error) {
@@ -280,8 +340,19 @@
             [self closeSession:session withError:@"Error connecting to tag."];
             return;
         }
-
-        [self processNDEFTag:session tag:ndefTag metaData:tagMetaData];
+        
+        /*if([tag asNFCISO7816Tag])
+        {
+            NSLog(@"Processing as NFCISO7816Tag");
+            id<NFCISO7816Tag> isoTag = (id<NFCISO7816Tag>)tag;
+            [self processTag:session tag:isoTag];
+        }
+        else{
+            NSLog(@"Processing as NFCNDEFTag");
+            [self processNDEFTag:session tag:ndefTag metaData:tagMetaData];
+        }*/
+        [self processNDEFTag:session tag:tag metaData:tagMetaData];
+        
     }];
 }
 
@@ -314,14 +385,14 @@
             self.nfcSession = [[NFCNDEFReaderSession new]initWithDelegate:self queue:nil invalidateAfterFirstRead:TRUE];
         }
         sessionCallbackId = [command.callbackId copy];
-        self.nfcSession.alertMessage = @"Hold near NFC tag to scan.";
+        self.nfcSession.alertMessage = @"Hold near wearable.";
         [self.nfcSession beginSession];
         
     } else if (@available(iOS 11.0, *)) {
         NSLog(@"iOS < 13, using NFCNDEFReaderSession");
         self.nfcSession = [[NFCNDEFReaderSession new]initWithDelegate:self queue:nil invalidateAfterFirstRead:TRUE];
         sessionCallbackId = [command.callbackId copy];
-        self.nfcSession.alertMessage = @"Hold near NFC tag to scan.";
+        self.nfcSession.alertMessage = @"Hold near wearable.";
         [self.nfcSession beginSession];
     } else {
         NSLog(@"iOS < 11, no NFC support");
@@ -332,11 +403,11 @@
         
 }
 
-- (void)processNDEFTag: (NFCReaderSession *)session tag:(__kindof id<NFCNDEFTag>)tag API_AVAILABLE(ios(13.0)) {
+- (void)processNDEFTag: (NFCReaderSession *)session tag:(__kindof id<NFCTag>)tag API_AVAILABLE(ios(13.0)) {
     [self processNDEFTag:session tag:tag metaData:[NSMutableDictionary new]];
 }
 
-- (void)processNDEFTag: (NFCReaderSession *)session tag:(__kindof id<NFCNDEFTag>)tag metaData: (NSMutableDictionary * _Nonnull)metaData API_AVAILABLE(ios(13.0)) {
+- (void)processNDEFTag: (NFCReaderSession *)session tag:(__kindof id<NFCTag>)tag metaData: (NSMutableDictionary * _Nonnull)metaData API_AVAILABLE(ios(13.0)) {
                             
     [tag queryNDEFStatusWithCompletionHandler:^(NFCNDEFStatus status, NSUInteger capacity, NSError * _Nullable error) {
         if (error) {
@@ -358,6 +429,7 @@
 
     }];
 }
+
 
 - (void)readNDEFTag:(NFCReaderSession * _Nonnull)session status:(NFCNDEFStatus)status tag:(id<NFCNDEFTag>)tag metaData:(NSMutableDictionary * _Nonnull)metaData  API_AVAILABLE(ios(13.0)){
         
@@ -383,7 +455,7 @@
             return;
         } else {
             NSLog(@"%@", message);
-            session.alertMessage = @"Tag successfully read.";
+            session.alertMessage = @"Done!";
             [self fireNdefEvent:message metaData:metaData];
             [self closeSession:session];
         }
@@ -617,6 +689,16 @@
         jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
     }
     return jsonString;
+}
+
+- (NSString*) binToHexRep:(NSData *)data {
+    NSUInteger dataLength = [data length];
+    NSMutableString *hexString = [NSMutableString stringWithCapacity:dataLength*2];
+    const unsigned char *dataBytes = [data bytes];
+    for (NSInteger idx = 0; idx < dataLength; ++idx) {
+        [hexString appendFormat:@"%02x", dataBytes[idx]];
+    }
+    return hexString;
 }
 
 @end

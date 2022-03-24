@@ -566,6 +566,24 @@ var nfc = {
         });
     },
 
+    sendApdu: function(data) {
+        return new Promise(function(resolve, reject) {
+
+            var buffer;
+            if (typeof data === 'string') {
+                buffer = util.hexStringToArrayBuffer(data);
+            } else if (data instanceof ArrayBuffer) {
+                buffer = data;
+            } else if (data instanceof Uint8Array) {
+                buffer = data.buffer;
+            } else {
+                reject("Expecting an ArrayBuffer or String");
+            }
+
+            cordova.exec(resolve, reject, 'NfcPlugin', 'sendApdu', [buffer]);
+        });
+    },
+
     // Android NfcAdapter.enableReaderMode flags 
     FLAG_READER_NFC_A: 0x1,
     FLAG_READER_NFC_B: 0x2,
